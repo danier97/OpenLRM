@@ -15,14 +15,15 @@
 
 import torch
 import torch.nn as nn
-from accelerate.logging import get_logger
+# from accelerate.logging import get_logger
+from loguru import logger
 
 from .embedder import CameraEmbedder
 from .transformer import TransformerDecoder
 from .rendering.synthesizer import TriplaneSynthesizer
 
 
-logger = get_logger(__name__)
+# logger = get_logger(__name__)
 
 
 class ModelLRM(nn.Module):
@@ -87,6 +88,26 @@ class ModelLRM(nn.Module):
             mod=camera_embeddings,
         )
         return x
+    
+    def forward_transformer_intermediates(self, image_feats, camera_embeddings, layer):
+        assert image_feats.shape[0] == camera_embeddings.shape[0], \
+            "Batch size mismatch for image_feats and camera_embeddings!"
+        N = image_feats.shape[0]
+        x = self.pos_embed.repeat(N, 1, 1)  # [N, L, D]
+        cond = image_feats
+        mod = camera_embeddings
+
+        # run transformer layer by layer
+        self.transformer.assert_runtime_integrity(x, cond, mod)
+        blocks = self.transformer.layers[:layer + 1]
+        for layer in blocks:
+            x = self.transformer.forward_layer(layer, x, cond, mod)
+
+        dense_tokens = x.view(N, 3, self.triplane_low_res, self.triplane_low_res, -1)
+        planes = dense_tokens.chunk(3, dim=1) # (B,1,H,W,C) x 3
+        planes = [plane.squeeze(dim=1).permute(0, 3, 1, 2).contiguous() for plane in planes] # (B,C,H,W) x 3
+        out = [(torch.cat(planes, dim=1), None)]
+        return out
 
     def reshape_upsample(self, tokens):
         N = tokens.shape[0]
@@ -123,6 +144,25 @@ class ModelLRM(nn.Module):
         assert planes.shape[1] == 3, "Planes should have 3 channels"
 
         return planes
+
+    def forward_intermediates(self, x, camera, layer):
+        # encode image
+        if layer < len(self.encoder.model.blocks): # 12
+            # what we want is from DINOv2 backbone
+            return self.encoder.forward_intermediates(x, layer=layer)
+
+        image_feats = self.encoder(x)
+        assert image_feats.shape[-1] == self.encoder_feat_dim, \
+            f"Feature dimension mismatch: {image_feats.shape[-1]} vs {self.encoder_feat_dim}"
+
+        # embed camera
+        camera_embeddings = self.camera_embedder(camera)
+        assert camera_embeddings.shape[-1] == self.camera_embed_dim, \
+            f"Feature dimension mismatch: {camera_embeddings.shape[-1]} vs {self.camera_embed_dim}"
+
+        # what we want is from the transformer generating planes
+        layer -= len(self.encoder.model.blocks)
+        return self.forward_transformer_intermediates(image_feats, camera_embeddings, layer=layer)
 
     def forward(self, image, source_camera, render_cameras, render_anchors, render_resolutions, render_bg_colors, render_region_size: int):
         # image: [N, C_img, H_img, W_img]

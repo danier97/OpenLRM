@@ -16,10 +16,10 @@
 from functools import partial
 import torch
 import torch.nn as nn
-from accelerate.logging import get_logger
+# from accelerate.logging import get_logger
+from loguru import logger
 
-
-logger = get_logger(__name__)
+# logger = get_logger(__name__)
 
 
 class TransformerDecoder(nn.Module):

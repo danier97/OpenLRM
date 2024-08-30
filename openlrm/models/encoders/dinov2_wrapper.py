@@ -15,10 +15,10 @@
 
 import torch
 import torch.nn as nn
-from accelerate.logging import get_logger
+# from accelerate.logging import get_logger
+from loguru import logger
 
-
-logger = get_logger(__name__)
+# logger = get_logger(__name__)
 
 
 class Dinov2Wrapper(nn.Module):
@@ -65,3 +65,31 @@ class Dinov2Wrapper(nn.Module):
             outs["x_norm_patchtokens"],
         ], dim=1)
         return ret
+
+
+    def forward_intermediates(self, image: torch.Tensor, mod: torch.Tensor = None, layer=None):
+        # image: [N, C, H, W]
+        # mod: [N, D] or None
+        # RGB image with [0,1] scale and properly sized
+        b, _, h, w = image.shape
+        x = self.model.prepare_tokens_with_masks(image)
+
+        layer_feat = None
+        if mod is None:
+            assert self.modulation_dim is None,  "Unexpected modulation input in dinov2 forward."
+            blocks = self.model.blocks[:layer + 1]
+            for blk in blocks:
+                x = blk(x)
+            layer_feat = x
+        else:
+            assert self.modulation_dim is not None, "Modulation input is required in modulated dinov2 forward."
+            blocks = self.model.blocks[:layer + 1]
+            for blk in blocks:
+                x = blk(x, mod)
+            layer_feat = x
+
+        class_token = layer_feat[:, 0]
+        dense_tokens = layer_feat[:, self.model.num_register_tokens + 1 :]
+        dense_tokens = dense_tokens.reshape(b, h // self.model.patch_size, w // self.model.patch_size, -1).permute(0, 3, 1, 2).contiguous()
+        out = [(dense_tokens, class_token)]
+        return out
